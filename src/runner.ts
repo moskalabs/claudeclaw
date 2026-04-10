@@ -12,6 +12,29 @@ import { getSettings, type ModelConfig, type SecurityConfig } from "./config";
 import { buildClockPromptPrefix } from "./timezone";
 import { selectModel } from "./model-router";
 
+// Windows: call node + cli.js directly to bypass cmd.exe argument parsing issues.
+// cmd.exe breaks multi-line -p arguments and --resume flags.
+function getClaudeCommand(): string[] {
+  if (process.platform === "win32") {
+    // Resolve claude.cmd location, then find the actual cli.js next to it
+    const cmdPath = Bun.which("claude.cmd");
+    if (cmdPath) {
+      const cmdDir = cmdPath.replace(/[\\\/]claude\.cmd$/i, "");
+      const cliJs = join(cmdDir, "node_modules", "@anthropic-ai", "claude-code", "cli.js");
+      if (existsSync(cliJs)) {
+        console.log(`[init] Bypassing claude.cmd → node ${cliJs}`);
+        return ["node", cliJs];
+      }
+    }
+    // Fallback: use claude.cmd (will have issues with multi-line args)
+    console.warn("[init] Could not find claude cli.js, falling back to claude.cmd");
+    return ["claude.cmd"];
+  }
+  return ["claude"];
+}
+
+const CLAUDE_ARGS = getClaudeCommand();
+
 const LOGS_DIR = join(process.cwd(), ".claude/claudeclaw/logs");
 // Resolve prompts relative to the claudeclaw installation, not the project dir
 const PROMPTS_DIR = join(import.meta.dir, "..", "prompts");
@@ -130,6 +153,9 @@ async function runClaudeOnce(
   const normalizedModel = model.trim().toLowerCase();
   if (model.trim() && normalizedModel !== "glm") args.push("--model", model.trim());
 
+  // Debug: log the command being executed
+  console.log(`[${new Date().toLocaleTimeString()}] Spawning: ${args.slice(0, CLAUDE_ARGS.length).join(' ')} (platform: ${process.platform})`);
+
   const proc = Bun.spawn(args, {
     stdout: "pipe",
     stderr: "pipe",
@@ -150,6 +176,12 @@ async function runClaudeOnce(
     ]) as [string, string];
     await proc.exited;
 
+    // Debug logging for exit code issues
+    if (proc.exitCode !== 0) {
+      console.error(`[${new Date().toLocaleTimeString()}] Claude exit code: ${proc.exitCode}`);
+      console.error(`[${new Date().toLocaleTimeString()}] stderr: ${stderr}`);
+      console.error(`[${new Date().toLocaleTimeString()}] args: ${args.slice(0, 5).join(' ')}...`);
+    }
     return {
       rawStdout,
       stderr,
@@ -303,7 +335,7 @@ export async function runCompact(
   timeoutMs: number
 ): Promise<boolean> {
   const compactArgs = [
-    "claude", "-p", "/compact",
+    ...CLAUDE_ARGS, "-p", "/compact",
     "--output-format", "text",
     "--resume", sessionId,
     ...securityArgs,
@@ -387,7 +419,7 @@ async function execClaude(name: string, prompt: string, threadId?: string): Prom
   // New session: use json output to capture Claude's session_id
   // Resumed session: use text output with --resume
   const outputFormat = isNew ? "json" : "text";
-  const args = ["claude", "-p", prompt, "--output-format", outputFormat, ...securityArgs];
+  const args = [...CLAUDE_ARGS, "-p", prompt, "--output-format", outputFormat, ...securityArgs];
 
   if (!isNew) {
     args.push("--resume", existing.sessionId);
@@ -402,15 +434,7 @@ async function execClaude(name: string, prompt: string, threadId?: string): Prom
   ];
   if (promptContent) appendParts.push(promptContent);
 
-  // Load the project's CLAUDE.md if it exists
-  if (existsSync(PROJECT_CLAUDE_MD)) {
-    try {
-      const claudeMd = await Bun.file(PROJECT_CLAUDE_MD).text();
-      if (claudeMd.trim()) appendParts.push(claudeMd.trim());
-    } catch (e) {
-      console.error(`[${new Date().toLocaleTimeString()}] Failed to read project CLAUDE.md:`, e);
-    }
-  }
+  // CLAUDE.md is loaded automatically by Claude Code — no need to duplicate it here.
 
   if (security.level !== "unrestricted") appendParts.push(DIR_SCOPE_PROMPT);
   if (appendParts.length > 0) {
@@ -459,7 +483,34 @@ async function execClaude(name: string, prompt: string, threadId?: string): Prom
         console.log(`[${new Date().toLocaleTimeString()}] Session created: ${sessionId}`);
       }
     } catch (e) {
-      console.error(`[${new Date().toLocaleTimeString()}] Failed to parse session from Claude output:`, e);
+      // Windows claude.cmd may return text instead of JSON — fallback: find latest session from Claude's session directory
+      console.warn(`[${new Date().toLocaleTimeString()}] JSON parse failed, attempting session discovery from Claude projects dir...`);
+      try {
+        const { homedir } = await import("node:os");
+        const { readdir, stat } = await import("node:fs/promises");
+        const projectSlug = process.cwd().replace(/[\\\/]/g, "-").replace(/^-/, "");
+        const sessionsDir = join(homedir(), ".claude", "projects", projectSlug);
+        const files = await readdir(sessionsDir);
+        const jsonlFiles = files.filter(f => f.endsWith(".jsonl"));
+        let newest = { file: "", mtime: 0 };
+        for (const f of jsonlFiles) {
+          const s = await stat(join(sessionsDir, f));
+          if (s.mtimeMs > newest.mtime) {
+            newest = { file: f, mtime: s.mtimeMs };
+          }
+        }
+        if (newest.file) {
+          sessionId = newest.file.replace(".jsonl", "");
+          if (threadId) {
+            await createThreadSession(threadId, sessionId);
+          } else {
+            await createSession(sessionId);
+          }
+          console.log(`[${new Date().toLocaleTimeString()}] Session discovered from filesystem: ${sessionId}`);
+        }
+      } catch (dirErr) {
+        console.error(`[${new Date().toLocaleTimeString()}] Session discovery failed:`, dirErr);
+      }
     }
   }
 
@@ -560,7 +611,7 @@ async function streamClaude(
   // stream-json gives us events as they happen — text before tool calls,
   // so we can unblock the UI as soon as Claude acknowledges, not after sub-agents finish.
   // --verbose is required for stream-json to produce output in -p (print) mode.
-  const args = ["claude", "-p", prompt, "--output-format", "stream-json", "--verbose", ...securityArgs];
+  const args = [...CLAUDE_ARGS, "-p", prompt, "--output-format", "stream-json", "--verbose", ...securityArgs];
 
   if (existing) args.push("--resume", existing.sessionId);
 
@@ -568,12 +619,7 @@ async function streamClaude(
   const appendParts: string[] = ["You are running inside ClaudeClaw."];
   if (promptContent) appendParts.push(promptContent);
 
-  if (existsSync(PROJECT_CLAUDE_MD)) {
-    try {
-      const claudeMd = await Bun.file(PROJECT_CLAUDE_MD).text();
-      if (claudeMd.trim()) appendParts.push(claudeMd.trim());
-    } catch {}
-  }
+  // CLAUDE.md is loaded automatically by Claude Code — no need to duplicate it here.
 
   if (security.level !== "unrestricted") appendParts.push(DIR_SCOPE_PROMPT);
   if (appendParts.length > 0) {
