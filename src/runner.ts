@@ -12,22 +12,36 @@ import { getSettings, type ModelConfig, type SecurityConfig } from "./config";
 import { buildClockPromptPrefix } from "./timezone";
 import { selectModel } from "./model-router";
 
-// Windows: call node + cli.js directly to bypass cmd.exe argument parsing issues.
-// cmd.exe breaks multi-line -p arguments and --resume flags.
+// Windows: spawn the real Claude binary directly to bypass cmd.exe argument
+// parsing. cmd.exe truncates multi-line -p arguments (drops everything after
+// the first newline) and mangles --resume flags. We resolve claude.cmd, then
+// prefer the artifacts it wraps:
+//   1. bin/claude.exe  — newer native binary installs (spawned directly)
+//   2. cli.js          — older node-based installs (spawned as `node cli.js`)
+// Both are spawned via Bun.spawn without a shell, so multi-line args survive.
 function getClaudeCommand(): string[] {
   if (process.platform === "win32") {
-    // Resolve claude.cmd location, then find the actual cli.js next to it
     const cmdPath = Bun.which("claude.cmd");
     if (cmdPath) {
       const cmdDir = cmdPath.replace(/[\\\/]claude\.cmd$/i, "");
-      const cliJs = join(cmdDir, "node_modules", "@anthropic-ai", "claude-code", "cli.js");
+      const pkgDir = join(cmdDir, "node_modules", "@anthropic-ai", "claude-code");
+
+      // Newer installs ship a native binary; spawn it directly (no shell).
+      const claudeExe = join(pkgDir, "bin", "claude.exe");
+      if (existsSync(claudeExe)) {
+        console.log(`[init] Bypassing claude.cmd → ${claudeExe}`);
+        return [claudeExe];
+      }
+
+      // Older installs are node + cli.js.
+      const cliJs = join(pkgDir, "cli.js");
       if (existsSync(cliJs)) {
         console.log(`[init] Bypassing claude.cmd → node ${cliJs}`);
         return ["node", cliJs];
       }
     }
     // Fallback: use claude.cmd (will have issues with multi-line args)
-    console.warn("[init] Could not find claude cli.js, falling back to claude.cmd");
+    console.warn("[init] Could not find claude binary or cli.js, falling back to claude.cmd");
     return ["claude.cmd"];
   }
   return ["claude"];
