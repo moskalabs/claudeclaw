@@ -101,6 +101,7 @@ export interface SecurityConfig {
 }
 
 export interface Settings {
+  sessionTimeoutMs?: number;
   model: string;
   api: string;
   fallback: ModelConfig;
@@ -234,6 +235,7 @@ function parseSettings(raw: Record<string, any>): Settings {
       api: typeof raw.fallback?.api === "string" ? raw.fallback.api.trim() : "",
     },
     agentic: parseAgenticConfig(raw.agentic),
+    sessionTimeoutMs: Number.isFinite(raw.sessionTimeoutMs) && raw.sessionTimeoutMs > 0 ? Number(raw.sessionTimeoutMs) : undefined,
     timezone: parsedTimezone,
     timezoneOffsetMinutes: parseTimezoneOffsetMinutes(raw.timezoneOffsetMinutes, parsedTimezone),
     heartbeat: {
