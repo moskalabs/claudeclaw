@@ -1,0 +1,22 @@
+{
+  "model": "opus",
+  "api": "",
+  "fallback": { "model": "", "api": "" },
+  "agentic": { "enabled": false, "defaultMode": "implementation", "modes": [] },
+  "timezone": "Asia/Seoul",
+  "sessionTimeoutMs": 900000,
+  "heartbeat": {
+    "enabled": false,
+    "interval": 15,
+    "prompt": "Check git status and summarize recent changes."
+  },
+  "telegram": {
+    "token": "BOTFATHER_TOKEN_HERE",
+    "allowedUserIds": [123456789]
+  },
+  "security": {
+    "level": "moderate",
+    "allowedTools": [],
+    "disallowedTools": []
+  }
+}
